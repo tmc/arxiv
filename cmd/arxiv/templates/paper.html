@@ -447,6 +447,11 @@
 				// Re-setup click handlers and hovers
 				setupRefListHovers();
 				setupRefListClicks();
+
+				// Re-render any math in titles
+				if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+					MathJax.typesetPromise();
+				}
 			});
 	}
 
@@ -494,28 +499,42 @@
 	// Initial graph load
 	refreshGraph();
 
-	{{if .UncachedCount}}
-	const prefetchPoller = setInterval(() => {
-		fetch('/paper/' + paperID + '/refs')
+	// Prefetch reference titles and update the list
+	// Shows loading indicator, calls prefetch endpoint, then refreshes refs list
+	function prefetchAndRefresh() {
+		// Show loading indicator
+		const refsHeader = document.querySelector('h2');
+		let status = document.getElementById('prefetch-status');
+		if (!status && refsHeader && refsHeader.textContent.includes('References')) {
+			status = document.createElement('span');
+			status.id = 'prefetch-status';
+			status.className = 'loading';
+			status.textContent = ' Loading titles...';
+			refsHeader.appendChild(status);
+		}
+
+		// Call prefetch (synchronous - waits for all titles)
+		return fetch('/paper/' + paperID + '/prefetch-refs', { method: 'POST' })
 			.then(r => r.json())
-			.then(refs => {
-				let uncached = 0;
-				refs.forEach(r => {
-					if (!r.hasTitle) { uncached++; return; }
-					const li = document.querySelector('#refs-list li[data-id="' + r.id + '"]');
-					if (li && !li.querySelector('a.ref-title')) {
-						const dateStr = arxivIDToDate(r.id);
-						const datePart = dateStr ? ' <span class="ref-date">(' + dateStr + ')</span>' : '';
-						li.innerHTML = '<span class="ref-id">' + r.id + '</span> <a class="ref-title" href="/paper/' + r.id + '">' + escapeHtml(r.title) + '</a>' + datePart + (r.citedBy ? ' <span class="ref-meta">' + r.citedBy + ' cites</span>' : '');
-					}
-				});
-				if (uncached === 0) {
-					clearInterval(prefetchPoller);
-					const status = document.getElementById('prefetch-status');
-					if (status) status.remove();
-				}
+			.then(() => {
+				// Prefetch done - refresh the refs list to show titles
+				return refreshRefsList();
+			})
+			.then(() => {
+				refreshGraph();
+				const s = document.getElementById('prefetch-status');
+				if (s) s.remove();
+			})
+			.catch(err => {
+				console.error('Prefetch error:', err);
+				const s = document.getElementById('prefetch-status');
+				if (s) s.remove();
 			});
-	}, 2000);
+	}
+
+	{{if .UncachedCount}}
+	// Prefetch titles for uncached refs on page load
+	prefetchAndRefresh();
 	{{end}}
 
 	{{if .FetchingSource}}
@@ -526,11 +545,16 @@
 			.then(status => {
 				if (status.sourceDownloaded) {
 					clearInterval(sourcePoller);
-					// Remove the loading indicator
+					// Remove the source loading indicator
 					const sourceStatus = document.getElementById('source-status');
 					if (sourceStatus) sourceStatus.remove();
-					// Refresh the graph and references list
-					refreshRefsList().then(() => refreshGraph());
+
+					// Refresh refs list to show extracted citations, then prefetch titles
+					refreshRefsList().then(() => {
+						refreshGraph();
+						// Now prefetch titles for the newly extracted references
+						prefetchAndRefresh();
+					});
 				}
 			});
 	}, 2000);

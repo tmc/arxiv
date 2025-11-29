@@ -205,13 +205,17 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(path, "/prefetch-refs") {
 		paperID := strings.TrimSuffix(path, "/prefetch-refs")
 		if r.Method == http.MethodPost {
-			// Synchronous prefetch
+			// Synchronous prefetch - blocks until all titles are fetched
 			err := s.cache.PrefetchReferenceTitles(ctx, paperID)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
-			http.Redirect(w, r, "/paper/"+paperID, http.StatusSeeOther)
+			// Return JSON for AJAX requests
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 			return
 		}
 		// GET returns status of uncached references
@@ -332,14 +336,6 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Start background prefetch if there are uncached references
-	if uncachedCount > 0 {
-		go func() {
-			bgCtx := context.Background()
-			s.cache.PrefetchReferenceTitles(bgCtx, id)
-		}()
-	}
-
 	// Auto-fetch source in background if not downloaded
 	fetchingSource := false
 	if !paper.SourceDownloaded {
@@ -350,6 +346,7 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 			s.cache.DownloadPaper(bgCtx, id, opts)
 		}()
 	}
+	// Note: Client handles prefetch via /prefetch-refs endpoint
 
 	data := map[string]any{
 		"Title":          paper.Title,

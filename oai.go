@@ -87,9 +87,9 @@ func (c *OAIClient) ListRecords(ctx context.Context, set string, from, until tim
 	}
 
 	result := &OAIResponse{
-		ResumptionToken: oaiResp.ListRecords.ResumptionToken.Value,
+		ResumptionToken:  oaiResp.ListRecords.ResumptionToken.Value,
 		CompleteListSize: oaiResp.ListRecords.ResumptionToken.CompleteListSize,
-		Cursor:          oaiResp.ListRecords.ResumptionToken.Cursor,
+		Cursor:           oaiResp.ListRecords.ResumptionToken.Cursor,
 	}
 
 	for _, rec := range oaiResp.ListRecords.Records {
@@ -154,7 +154,7 @@ type oaiError struct {
 }
 
 type oaiListRecords struct {
-	Records         []oaiRecord         `xml:"record"`
+	Records         []oaiRecord        `xml:"record"`
 	ResumptionToken oaiResumptionToken `xml:"resumptionToken"`
 }
 

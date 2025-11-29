@@ -2,7 +2,9 @@ package arxiv
 
 import (
 	"bufio"
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -28,9 +30,16 @@ var arxivIDPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`ar.{0,5}iv.{0,20}(\d{4}\.\d{4,5})`),
 	// Bare arXiv IDs in certain contexts (eprint field)
 	regexp.MustCompile(`eprint\s*=\s*[{"']?(\d{4}\.\d{4,5}(?:v\d+)?)`),
+	// Old format: hep-th/9901001, hep-ph/9905221, cond-mat/0001234, quant-ph/9901001
+	regexp.MustCompile(`\b([a-z]+-[a-z]+/\d{7})\b`),
+	// Old format single category: cs/0001001, math/0001001
+	regexp.MustCompile(`\b((?:cs|math|astro-ph|gr-qc|nlin|nucl-ex|nucl-th|physics|q-bio|q-fin|stat)/\d{7})\b`),
+	// Old format with subcategory: cs.LG/0001001, math.CO/0001001
+	regexp.MustCompile(`(?i)\b([a-z]+\.[A-Z]{2}/\d{7})\b`),
 }
 
-// ExtractReferences extracts arXiv paper IDs from .bbl and .bib files in the source directory.
+// ExtractReferences extracts arXiv paper IDs from .bbl, .bib, and .tex files in the source directory.
+// Falls back to PDF extraction using pdftotext if no refs found in text files.
 func ExtractReferences(srcPath string) []string {
 	if srcPath == "" {
 		return nil
@@ -38,6 +47,7 @@ func ExtractReferences(srcPath string) []string {
 
 	seen := make(map[string]bool)
 	var refs []string
+	var pdfFiles []string
 
 	filepath.WalkDir(srcPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -45,7 +55,11 @@ func ExtractReferences(srcPath string) []string {
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".bbl" && ext != ".bib" {
+		if ext == ".pdf" {
+			pdfFiles = append(pdfFiles, path)
+			return nil
+		}
+		if ext != ".bbl" && ext != ".bib" && ext != ".tex" {
 			return nil
 		}
 
@@ -60,6 +74,11 @@ func ExtractReferences(srcPath string) []string {
 		}
 		return nil
 	})
+
+	// Fallback: if no refs found in text files, try PDFs
+	if len(refs) == 0 && len(pdfFiles) > 0 {
+		refs = extractFromPDFs(pdfFiles, seen)
+	}
 
 	return refs
 }
@@ -85,6 +104,36 @@ func extractFromFile(path string) []string {
 		}
 	}
 	return ids
+}
+
+// extractFromPDFs uses pdftotext to extract text from PDF files and find arXiv IDs.
+func extractFromPDFs(pdfFiles []string, seen map[string]bool) []string {
+	var refs []string
+
+	for _, pdfPath := range pdfFiles {
+		cmd := exec.Command("pdftotext", pdfPath, "-")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+
+		text := out.String()
+		for _, pat := range arxivIDPatterns {
+			matches := pat.FindAllStringSubmatch(text, -1)
+			for _, m := range matches {
+				if len(m) > 1 {
+					normalized := normalizeArxivID(m[1])
+					if !seen[normalized] {
+						seen[normalized] = true
+						refs = append(refs, normalized)
+					}
+				}
+			}
+		}
+	}
+
+	return refs
 }
 
 // normalizeArxivID strips version suffixes (e.g., "2301.00001v2" -> "2301.00001").
