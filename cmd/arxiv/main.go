@@ -45,7 +45,7 @@ func main() {
 		cmdSearch(ctx, cacheDir, args)
 	case "get":
 		cmdGet(ctx, cacheDir, args)
-	case "list":
+	case "list", "ls":
 		cmdList(ctx, cacheDir, args)
 	case "reindex":
 		cmdReindex(ctx, cacheDir, args)
@@ -69,7 +69,7 @@ Commands:
   stats      Show cache statistics
   search     Search cached papers
   get        Get a specific paper's info (cached only)
-  list       List cached papers
+  ls         List cached papers (alias: list)
   serve      Start web server to browse cached papers
 
 Environment:
@@ -82,8 +82,11 @@ Examples:
   arxiv get 2301.00001                # Show cached paper info
   arxiv search "transformer"          # Search cached papers
   arxiv stats                         # Show cache stats
-  arxiv list -limit 10                # List recent papers
-  arxiv serve -port 8080             # Start web server`)
+  arxiv ls                            # List all cached papers
+  arxiv ls cs.AI                      # List papers in category
+  arxiv ls -src                       # List only papers with source
+  arxiv ls -n 50                      # Limit to 50 results
+  arxiv serve -port 8080              # Start web server`)
 }
 
 func cmdFetch(ctx context.Context, cacheDir string, args []string) {
@@ -276,9 +279,10 @@ func cmdGet(ctx context.Context, cacheDir string, args []string) {
 
 func cmdList(ctx context.Context, cacheDir string, args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	category := fs.String("category", "", "Filter by category")
-	limit := fs.Int("limit", 20, "Max results")
-	offset := fs.Int("offset", 0, "Offset for pagination")
+	category := fs.String("cat", "", "Filter by category (e.g., cs.AI)")
+	limit := fs.Int("n", 0, "Max results (0 = all)")
+	srcOnly := fs.Bool("src", false, "Only papers with source downloaded")
+	all := fs.Bool("a", false, "Show all (including metadata-only)")
 	fs.Parse(args)
 
 	cache, err := arxiv.Open(cacheDir)
@@ -287,7 +291,12 @@ func cmdList(ctx context.Context, cacheDir string, args []string) {
 	}
 	defer cache.Close()
 
-	papers, err := cache.ListPapers(ctx, *category, *offset, *limit)
+	// Use remaining arg as category if provided
+	if fs.NArg() > 0 && *category == "" {
+		*category = fs.Arg(0)
+	}
+
+	papers, err := cache.ListPapersFiltered(ctx, *category, *srcOnly, *all, *limit)
 	if err != nil {
 		log.Fatalf("list: %v", err)
 	}
@@ -305,8 +314,9 @@ func cmdList(ctx context.Context, cacheDir string, args []string) {
 		if p.PDFDownloaded {
 			status += "[pdf]"
 		}
-		fmt.Printf("[%s] %s %s\n", p.ID, p.Title, status)
+		fmt.Printf("%s\t%s\t%s\n", p.ID, p.Title, status)
 	}
+	fmt.Fprintf(os.Stderr, "\n%d papers\n", len(papers))
 }
 
 func cmdReindex(ctx context.Context, cacheDir string, args []string) {

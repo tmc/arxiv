@@ -215,6 +215,67 @@ func (c *Cache) ListPapers(ctx context.Context, category string, offset, limit i
 	return papers, rows.Err()
 }
 
+// ListPapersFiltered lists papers with various filter options.
+func (c *Cache) ListPapersFiltered(ctx context.Context, category string, srcOnly, all bool, limit int) ([]Paper, error) {
+	sql := `
+		SELECT id, created, updated, title, abstract, authors, categories,
+		       comments, journal_ref, doi, license, pdf_downloaded, src_downloaded
+		FROM papers
+		WHERE 1=1
+	`
+	var args []any
+
+	if category != "" {
+		sql += " AND categories LIKE '%' || ? || '%'"
+		args = append(args, category)
+	}
+
+	if srcOnly {
+		sql += " AND src_downloaded = 1"
+	} else if !all {
+		// Default: show papers with source OR title (exclude metadata-only without useful info)
+		sql += " AND (src_downloaded = 1 OR title != '')"
+	}
+
+	sql += " ORDER BY id DESC"
+
+	if limit > 0 {
+		sql += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := c.db.QueryContext(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var papers []Paper
+	for rows.Next() {
+		var p Paper
+		var created, updated string
+		var pdfDl, srcDl int
+
+		err := rows.Scan(
+			&p.ID, &created, &updated, &p.Title, &p.Abstract, &p.Authors,
+			&p.Categories, &p.Comments, &p.JournalRef, &p.DOI, &p.License,
+			&pdfDl, &srcDl,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		p.Created, _ = time.Parse("2006-01-02", created)
+		p.Updated, _ = time.Parse("2006-01-02", updated)
+		p.PDFDownloaded = pdfDl == 1
+		p.SourceDownloaded = srcDl == 1
+
+		papers = append(papers, p)
+	}
+
+	return papers, rows.Err()
+}
+
 // DownloadCategory downloads papers for a category.
 func (c *Cache) DownloadCategory(ctx context.Context, category string, limit int, opts *DownloadOptions) error {
 	sql := `
