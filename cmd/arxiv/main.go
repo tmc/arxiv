@@ -59,34 +59,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`arxiv - offline arXiv cache manager
-
-Usage: arxiv <command> [options]
-
-Commands:
-  fetch      Fetch and download specific papers
-  sync       Sync paper metadata from arXiv OAI-PMH (bulk)
-  stats      Show cache statistics
-  search     Search cached papers
-  get        Get a specific paper's info (cached only)
-  ls         List cached papers (alias: list)
-  serve      Start web server to browse cached papers
-
-Environment:
-  ARXIV_CACHE  Cache directory (default: ~/.cache/arxiv)
-
-Examples:
-  arxiv fetch 2301.00001              # Fetch paper + source
-  arxiv fetch -pdf 2301.00001         # Fetch paper + PDF
-  arxiv fetch -all 2301.00001         # Fetch paper + source + PDF
-  arxiv get 2301.00001                # Show cached paper info
-  arxiv search "transformer"          # Search cached papers
-  arxiv stats                         # Show cache stats
-  arxiv ls                            # List all cached papers
-  arxiv ls cs.AI                      # List papers in category
-  arxiv ls -src                       # List only papers with source
-  arxiv ls -n 50                      # Limit to 50 results
-  arxiv serve -port 8080              # Start web server`)
+	fmt.Println(usageText)
 }
 
 func cmdFetch(ctx context.Context, cacheDir string, args []string) {

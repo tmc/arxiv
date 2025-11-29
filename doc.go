@@ -32,5 +32,3 @@
 //		log.Fatal(err)
 //	}
 package arxiv
-
-//go:generate go run github.com/tmc/misc/gocmddoc@latest -output README.md
