@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tmc/arxiv"
 )
@@ -47,11 +48,14 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/search", srv.handleSearch)
 	mux.HandleFunc("/paper/", srv.handlePaper)
+	mux.HandleFunc("/abs/", srv.handleAbs)
 	mux.HandleFunc("/author/", srv.handleAuthor)
 	mux.HandleFunc("/category/", srv.handleCategory)
 	mux.HandleFunc("/categories", srv.handleCategories)
 	mux.HandleFunc("/src/", srv.handleSource)
 	mux.HandleFunc("/pdf/", srv.handlePDF)
+	mux.HandleFunc("/robots.txt", srv.handleRobots)
+	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Starting server at http://localhost%s", addr)
@@ -70,6 +74,92 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 type server struct {
 	cache    *arxiv.Cache
 	cacheDir string
+}
+
+// sitemapURLs collects the public, crawlable URLs for the sitemap.
+// It currently includes:
+//   - Home page
+//   - Categories index
+//   - Individual categories
+//   - Recently updated papers for each category
+func (s *server) sitemapURLs(ctx context.Context) (arxiv.SitemapURLSet, error) {
+	base := arxiv.SiteBaseURL()
+
+	var urls arxiv.SitemapURLSet
+
+	// Static top-level pages
+	now := time.Now()
+	urls = append(urls,
+		arxiv.SitemapURL{
+			Loc:        base + "/",
+			LastMod:    &now,
+			ChangeFreq: "daily",
+			Priority:   1.0,
+		},
+		arxiv.SitemapURL{
+			Loc:        base + "/categories",
+			LastMod:    &now,
+			ChangeFreq: "daily",
+			Priority:   0.8,
+		},
+	)
+
+	// Categories and a slice of recent papers per category
+	categories, err := s.cache.ListCategories(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, c := range categories {
+		// Category listing page
+		urls = append(urls, arxiv.SitemapURL{
+			Loc:        fmt.Sprintf("%s/category/%s", base, c.Name),
+			ChangeFreq: "daily",
+			Priority:   0.7,
+		})
+
+		// A capped number of recent papers per category
+		papers, err := s.cache.ListPapers(ctx, c.Name, 0, 50)
+		if err != nil {
+			continue
+		}
+		for _, p := range papers {
+			lastMod := p.Updated
+			urls = append(urls, arxiv.SitemapURL{
+				Loc:        fmt.Sprintf("%s/abs/%s", base, p.ID),
+				LastMod:    &lastMod,
+				ChangeFreq: "weekly",
+				Priority:   0.6,
+			})
+		}
+	}
+
+	return urls, nil
+}
+
+// handleSitemap serves the XML sitemap at /sitemap.xml.
+func (s *server) handleSitemap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	urls, err := s.sitemapURLs(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data, err := arxiv.BuildSitemapXML(urls)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -107,9 +197,9 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if query looks like an arXiv ID or URL - redirect to paper page
+	// Check if query looks like an arXiv ID or URL - redirect to abs page
 	if arxivID := extractArxivID(query); arxivID != "" {
-		http.Redirect(w, r, "/paper/"+arxivID, http.StatusFound)
+		http.Redirect(w, r, "/abs/"+arxivID, http.StatusFound)
 		return
 	}
 
@@ -293,6 +383,36 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := path
+
+	// For canonical viewing, redirect plain /paper/{id} to /abs/{id}
+	// while keeping the /paper/ namespace for auxiliary actions
+	// like /paper/{id}/fetch, /graph, etc.
+	if !strings.Contains(id, "/") {
+		http.Redirect(w, r, "/abs/"+id, http.StatusMovedPermanently)
+		return
+	}
+
+	// Fallback: if we somehow reach here with a nested path that is not
+	// handled above, just 404 to avoid serving ambiguous routes.
+	http.NotFound(w, r)
+}
+
+// handleAbs serves arXiv-style abstract URLs at /abs/{id}, mirroring arxiv.org.
+// This allows users to switch between arxiv.org and arxiv.gg by only changing
+// the domain part of the URL.
+func (s *server) handleAbs(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/abs/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	s.renderPaper(w, r, id)
+}
+
+// renderPaper contains the core logic for rendering a paper page given an ID.
+func (s *server) renderPaper(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
 	paper, err := s.cache.GetPaper(ctx, id)
 	if err != nil {
 		// Paper not in cache - check if it looks like a valid arXiv ID and auto-fetch
@@ -429,12 +549,29 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 	paperID := path
 	paper, err := s.cache.GetPaper(ctx, paperID)
 	if err != nil {
-		http.NotFound(w, r)
-		return
+		// Ensure metadata exists (fetch from arxiv.org if needed)
+		paper, err = s.cache.Fetch(ctx, paperID)
+		if err != nil {
+			http.Error(w, "failed to fetch paper: "+err.Error(), http.StatusNotFound)
+			return
+		}
 	}
 
+	// Download PDF if we don't have it yet
 	if !paper.PDFDownloaded || paper.PDFPath == "" {
-		http.Error(w, "PDF not cached", http.StatusNotFound)
+		opts := &arxiv.DownloadOptions{DownloadPDF: true, DownloadSource: false}
+		if err := s.cache.DownloadPaper(ctx, paper.ID, opts); err != nil {
+			http.Error(w, "failed to download PDF: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Reload paper metadata to get updated PDFPath
+		if p2, err := s.cache.GetPaper(ctx, paperID); err == nil {
+			paper = p2
+		}
+	}
+
+	if paper.PDFPath == "" {
+		http.Error(w, "PDF path missing", http.StatusInternalServerError)
 		return
 	}
 
@@ -484,6 +621,27 @@ func (s *server) handleSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.ServeFile(w, r, fullPath)
+}
+
+// handleRobots serves a static robots.txt file from the project root
+// if it exists, otherwise returns a minimal default that points to
+// the sitemap.
+func (s *server) handleRobots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Try to serve robots.txt from the working directory
+	if _, err := os.Stat("robots.txt"); err == nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		http.ServeFile(w, r, "robots.txt")
+		return
+	}
+
+	// Fallback minimal robots.txt
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "User-agent: *\nDisallow:\n\nSitemap: %s/sitemap.xml\n", arxiv.SiteBaseURL())
 }
 
 // parseAuthors splits an author string into individual author names.

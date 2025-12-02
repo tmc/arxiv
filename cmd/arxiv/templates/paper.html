@@ -117,10 +117,11 @@
 
 <div class="actions">
 	{{if .Paper.PDFDownloaded}}<a class="btn" href="/pdf/{{.Paper.ID}}">View PDF</a>{{else}}<form style="display:inline" method="POST" action="/pdf/{{.Paper.ID}}/fetch"><button class="btn btn-secondary">Fetch PDF</button></form>{{end}}
+	<a class="btn btn-secondary" href="{{.Paper.AbstractURL}}" target="_blank" rel="noopener noreferrer">Open on arxiv.org</a>
 </div>
 {{if .FetchingSource}}<div class="loading" id="source-status">Fetching TeX source and extracting references...</div>{{end}}
 <div class="links">
-	<a href="{{.Paper.AbstractURL}}">arXiv</a>
+	<a href="{{.Paper.AbstractURL}}">Original on arxiv.org</a>
 	<a href="{{.Paper.PDFURL}}">PDF (external)</a>
 	{{if .Paper.DOI}}<a href="https://doi.org/{{.Paper.DOI}}">DOI</a>{{end}}
 </div>
@@ -146,7 +147,7 @@
 {{range .PaperList}}{{if .IsRef}}
 <li data-id="{{.ID}}">
 	<span class="ref-id">{{.ID}}</span>
-	{{if .Cached}}<a class="ref-title" href="/paper/{{.ID}}">{{.Title}}</a> <span class="ref-date">({{arxivIDToDate .ID}})</span>{{if .Citations}} <span class="ref-meta">{{.Citations}} cites</span>{{end}}
+	{{if .Cached}}<a class="ref-title" href="/abs/{{.ID}}">{{.Title}}</a> <span class="ref-date">({{arxivIDToDate .ID}})</span>{{if .Citations}} <span class="ref-meta">{{.Citations}} cites</span>{{end}}
 	{{else}}<span class="ref-uncached">{{.ID}}</span> <span class="ref-date">({{arxivIDToDate .ID}})</span> <a href="/paper/{{.ID}}/fetch">[fetch]</a>{{end}}
 </li>
 {{end}}{{end}}
@@ -157,7 +158,7 @@
 {{range .PaperList}}{{if .IsCiting}}
 <li data-id="{{.ID}}">
 	<span class="ref-id">{{.ID}}</span>
-	<a class="ref-title" href="/paper/{{.ID}}">{{.Title}}</a> <span class="ref-date">({{arxivIDToDate .ID}})</span>{{if .Citations}} <span class="ref-meta">{{.Citations}} cites</span>{{end}}
+	<a class="ref-title" href="/abs/{{.ID}}">{{.Title}}</a> <span class="ref-date">({{arxivIDToDate .ID}})</span>{{if .Citations}} <span class="ref-meta">{{.Citations}} cites</span>{{end}}
 </li>
 {{end}}{{end}}
 </ul>
