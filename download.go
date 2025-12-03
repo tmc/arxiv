@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,13 +42,20 @@ func (c *Cache) DownloadPaper(ctx context.Context, paperID string, opts *Downloa
 		return fmt.Errorf("get paper: %w", err)
 	}
 
-	if opts.DownloadPDF && !paper.PDFDownloaded {
+	// Download or repair missing PDF
+	if opts.DownloadPDF && (!paper.PDFDownloaded || paper.PDFPath == "") {
 		pdfPath, err := c.downloadPDF(ctx, paper)
 		if err != nil {
 			return fmt.Errorf("download pdf: %w", err)
 		}
-		c.db.ExecContext(ctx, "UPDATE papers SET pdf_path = ?, pdf_downloaded = 1 WHERE id = ?",
-			pdfPath, paperID)
+		c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", paperID).
+			Updates(map[string]interface{}{"pdf_path": pdfPath, "pdf_downloaded": true})
+		
+		// Extract PDF text in background for search
+		go func() {
+			bgCtx := context.Background()
+			c.EnsurePDFText(bgCtx, paperID)
+		}()
 	}
 
 	if opts.DownloadSource && !paper.SourceDownloaded {
@@ -57,48 +63,35 @@ func (c *Cache) DownloadPaper(ctx context.Context, paperID string, opts *Downloa
 		if err != nil {
 			return fmt.Errorf("download source: %w", err)
 		}
-		c.db.ExecContext(ctx, "UPDATE papers SET src_path = ?, src_downloaded = 1 WHERE id = ?",
-			srcPath, paperID)
+		c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", paperID).
+			Updates(map[string]interface{}{"src_path": srcPath, "src_downloaded": true})
 
 		// Extract and store citations
 		if err := c.UpdateCitations(ctx, paperID, srcPath); err != nil {
 			// Non-fatal: log but don't fail the download
-			_ = err
+			fmt.Printf("Warning: failed to extract citations for %s: %v\n", paperID, err)
 		}
 	}
 
 	return nil
 }
 
-// GetPaper retrieves a paper by ID.
+// GetPaper retrieves a paper by ID, using LRU cache when available.
 func (c *Cache) GetPaper(ctx context.Context, id string) (*Paper, error) {
-	row := c.db.QueryRowContext(ctx, `
-		SELECT id, created, updated, title, abstract, authors, categories,
-		       comments, journal_ref, doi, license, pdf_path, src_path,
-		       pdf_downloaded, src_downloaded
-		FROM papers WHERE id = ?
-	`, id)
+	// Check LRU cache first
+	if cached, ok := c.paperLRU.Get(id); ok {
+		if paper, ok := cached.(*Paper); ok {
+			return paper, nil
+		}
+	}
 
 	var p Paper
-	var created, updated string
-	var pdfPath, srcPath sql.NullString
-	var pdfDl, srcDl int
-
-	err := row.Scan(
-		&p.ID, &created, &updated, &p.Title, &p.Abstract, &p.Authors,
-		&p.Categories, &p.Comments, &p.JournalRef, &p.DOI, &p.License,
-		&pdfPath, &srcPath, &pdfDl, &srcDl,
-	)
-	if err != nil {
+	if err := c.db.WithContext(ctx).Where("id = ?", id).First(&p).Error; err != nil {
 		return nil, err
 	}
 
-	p.Created, _ = time.Parse("2006-01-02", created)
-	p.Updated, _ = time.Parse("2006-01-02", updated)
-	p.PDFPath = pdfPath.String
-	p.SourcePath = srcPath.String
-	p.PDFDownloaded = pdfDl == 1
-	p.SourceDownloaded = srcDl == 1
+	// Cache the result
+	c.paperLRU.Put(id, &p)
 
 	return &p, nil
 }

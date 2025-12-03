@@ -59,7 +59,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(usageText)
+	fmt.Print(usageText)
 }
 
 func cmdFetch(ctx context.Context, cacheDir string, args []string) {
@@ -145,7 +145,8 @@ func cmdSync(ctx context.Context, cacheDir string, args []string) {
 	if err := cache.SyncMetadata(ctx, opts); err != nil {
 		log.Fatalf("sync: %v", err)
 	}
-	fmt.Println("\nSync complete!")
+	fmt.Println()
+	fmt.Println("Sync complete!")
 }
 
 func cmdStats(ctx context.Context, cacheDir string, args []string) {
@@ -204,7 +205,8 @@ func cmdSearch(ctx context.Context, cacheDir string, args []string) {
 		if p.PDFDownloaded {
 			fmt.Printf(" [pdf cached]")
 		}
-		fmt.Println("\n")
+		fmt.Println()
+		fmt.Println()
 	}
 }
 

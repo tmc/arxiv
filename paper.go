@@ -2,56 +2,9 @@ package arxiv
 
 import (
 	"strings"
-	"time"
 )
 
-// Paper represents an arXiv paper's metadata.
-type Paper struct {
-	// ID is the arXiv identifier (e.g., "2301.00001" or "hep-th/9901001")
-	ID string
-
-	// Created is when the paper was first submitted
-	Created time.Time
-
-	// Updated is when the paper was last updated
-	Updated time.Time
-
-	// Title of the paper
-	Title string
-
-	// Abstract of the paper
-	Abstract string
-
-	// Authors as a single string (arXiv format)
-	Authors string
-
-	// Categories is a space-separated list of arXiv categories
-	Categories string
-
-	// Comments from the submitter (e.g., "10 pages, 3 figures")
-	Comments string
-
-	// JournalRef is the journal reference if published
-	JournalRef string
-
-	// DOI is the Digital Object Identifier if available
-	DOI string
-
-	// License URL
-	License string
-
-	// PDFPath is the local path to the PDF (if downloaded)
-	PDFPath string
-
-	// SourcePath is the local path to the TeX source (if downloaded)
-	SourcePath string
-
-	// PDFDownloaded indicates if the PDF has been downloaded
-	PDFDownloaded bool
-
-	// SourceDownloaded indicates if the source has been downloaded
-	SourceDownloaded bool
-}
+// Paper methods are defined here, struct is in models.go
 
 // PrimaryCategory returns the primary (first) category.
 func (p *Paper) PrimaryCategory() string {

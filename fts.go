@@ -4,17 +4,16 @@ import "context"
 
 // RebuildFTSIndex rebuilds the FTS5 index from all papers.
 // Use this after migrating an existing database to FTS5.
+// Note: Uses raw SQL because GORM doesn't support FTS5 virtual tables.
 func (c *Cache) RebuildFTSIndex(ctx context.Context) error {
 	// Delete existing FTS data
-	_, err := c.db.ExecContext(ctx, "DELETE FROM papers_fts")
-	if err != nil {
+	if err := c.db.WithContext(ctx).Exec("DELETE FROM papers_fts").Error; err != nil {
 		return err
 	}
 
 	// Rebuild from papers table
-	_, err = c.db.ExecContext(ctx, `
+	return c.db.WithContext(ctx).Exec(`
 		INSERT INTO papers_fts(rowid, title, abstract)
 		SELECT rowid, title, abstract FROM papers
-	`)
-	return err
+	`).Error
 }

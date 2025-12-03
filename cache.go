@@ -2,18 +2,20 @@ package arxiv
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 // Cache manages a local offline cache of arXiv papers.
 type Cache struct {
-	root string
-	db   *sql.DB
+	root     string
+	db       *gorm.DB
+	paperLRU *LRUCache // In-memory cache for papers
 }
 
 // Open opens or creates an arXiv cache at the given root directory.
@@ -30,14 +32,26 @@ func Open(root string) (*Cache, error) {
 	}
 
 	dbPath := filepath.Join(root, "index.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Use sqlite3 driver (not modernc) for FTS5 support
+	// Add connection string parameters to ensure FTS5 is available
+	dsn := dbPath + "?_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Dialector{
+		DriverName: "sqlite3",
+		DSN:        dsn,
+	}, &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	c := &Cache{root: root, db: db}
+	// LRU cache size: with 15GB+ RAM, we can cache hundreds of thousands of papers
+	// Each Paper struct is ~1-2KB, so 500k entries = ~500MB-1GB memory (still <10% of RAM)
+	lruSize := 500000
+	c := &Cache{
+		root:     root,
+		db:       db,
+		paperLRU: NewLRUCache(lruSize), // Cache 500k most recent papers (~500MB-1GB)
+	}
 	if err := c.initSchema(); err != nil {
-		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return c, nil
@@ -45,7 +59,11 @@ func Open(root string) (*Cache, error) {
 
 // Close closes the cache database.
 func (c *Cache) Close() error {
-	return c.db.Close()
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
 // Root returns the cache root directory.
@@ -54,44 +72,14 @@ func (c *Cache) Root() string {
 }
 
 func (c *Cache) initSchema() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS papers (
-		id TEXT PRIMARY KEY,
-		created TEXT,
-		updated TEXT,
-		title TEXT,
-		abstract TEXT,
-		authors TEXT,
-		categories TEXT,
-		comments TEXT,
-		journal_ref TEXT,
-		doi TEXT,
-		license TEXT,
-		pdf_path TEXT,
-		src_path TEXT,
-		pdf_downloaded INTEGER DEFAULT 0,
-		src_downloaded INTEGER DEFAULT 0,
-		metadata_updated TEXT
-	);
+	// GORM AutoMigrate handles all regular tables (Paper, Citation, SyncState, DownloadQueueItem)
+	if err := c.db.AutoMigrate(&Paper{}, &Citation{}, &SyncState{}, &DownloadQueueItem{}); err != nil {
+		return fmt.Errorf("auto migrate: %w", err)
+	}
 
-	CREATE INDEX IF NOT EXISTS idx_papers_created ON papers(created);
-	CREATE INDEX IF NOT EXISTS idx_papers_updated ON papers(updated);
-	CREATE INDEX IF NOT EXISTS idx_papers_categories ON papers(categories);
-
-	CREATE TABLE IF NOT EXISTS sync_state (
-		key TEXT PRIMARY KEY,
-		value TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS download_queue (
-		paper_id TEXT PRIMARY KEY,
-		type TEXT,
-		priority INTEGER DEFAULT 0,
-		added TEXT,
-		attempts INTEGER DEFAULT 0,
-		last_error TEXT
-	);
-
+	// FTS5 virtual tables and triggers MUST use raw SQL - GORM doesn't support FTS5
+	// We use GORM's Exec() method to stay consistent with GORM patterns
+	ftsSchema := `
 	CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
 		title,
 		abstract,
@@ -115,40 +103,31 @@ func (c *Cache) initSchema() error {
 		INSERT INTO papers_fts(rowid, title, abstract)
 		VALUES (NEW.rowid, NEW.title, NEW.abstract);
 	END;
-
-	CREATE TABLE IF NOT EXISTS citations (
-		from_id TEXT NOT NULL,
-		to_id TEXT NOT NULL,
-		PRIMARY KEY (from_id, to_id)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_citations_to_id ON citations(to_id);
 	`
-	_, err := c.db.Exec(schema)
-	return err
+	if err := c.db.Exec(ftsSchema).Error; err != nil {
+		// FTS5 not available - log but don't fail (search will fall back to LIKE queries)
+		fmt.Printf("Warning: FTS5 not available (%v), full-text search will use fallback methods\n", err)
+	}
+	return nil
 }
 
 // Stats returns cache statistics.
 func (c *Cache) Stats(ctx context.Context) (*CacheStats, error) {
 	stats := &CacheStats{}
 
-	err := c.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM papers").Scan(&stats.TotalPapers)
-	if err != nil {
+	if err := c.db.WithContext(ctx).Model(&Paper{}).Count(&stats.TotalPapers).Error; err != nil {
 		return nil, err
 	}
 
-	err = c.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM papers WHERE pdf_downloaded = 1").Scan(&stats.PDFsDownloaded)
-	if err != nil {
+	if err := c.db.WithContext(ctx).Model(&Paper{}).Where("pdf_downloaded = ?", true).Count(&stats.PDFsDownloaded).Error; err != nil {
 		return nil, err
 	}
 
-	err = c.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM papers WHERE src_downloaded = 1").Scan(&stats.SourcesDownloaded)
-	if err != nil {
+	if err := c.db.WithContext(ctx).Model(&Paper{}).Where("src_downloaded = ?", true).Count(&stats.SourcesDownloaded).Error; err != nil {
 		return nil, err
 	}
 
-	err = c.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM download_queue").Scan(&stats.QueuedDownloads)
-	if err != nil {
+	if err := c.db.WithContext(ctx).Model(&DownloadQueueItem{}).Count(&stats.QueuedDownloads).Error; err != nil {
 		return nil, err
 	}
 

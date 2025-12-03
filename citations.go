@@ -18,22 +18,15 @@ func (c *Cache) UpdateCitations(ctx context.Context, paperID, srcPath string) er
 	}
 
 	// Delete existing citations from this paper (in case of re-index)
-	_, err := c.db.ExecContext(ctx, "DELETE FROM citations WHERE from_id = ?", paperID)
-	if err != nil {
-		return err
-	}
+	c.db.WithContext(ctx).Where("from_id = ?", paperID).Delete(&Citation{})
 
 	// Insert new citations
 	for _, refID := range refs {
 		if refID == paperID {
 			continue // Skip self-citations
 		}
-		_, err := c.db.ExecContext(ctx,
-			"INSERT OR IGNORE INTO citations (from_id, to_id) VALUES (?, ?)",
-			paperID, refID)
-		if err != nil {
-			return err
-		}
+		citation := Citation{FromID: paperID, ToID: refID}
+		c.db.WithContext(ctx).FirstOrCreate(&citation, citation)
 	}
 
 	return nil
@@ -41,10 +34,9 @@ func (c *Cache) UpdateCitations(ctx context.Context, paperID, srcPath string) er
 
 // CitedByCount returns the number of cached papers that cite this paper.
 func (c *Cache) CitedByCount(ctx context.Context, paperID string) (int, error) {
-	var count int
-	err := c.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM citations WHERE to_id = ?", paperID).Scan(&count)
-	return count, err
+	var count int64
+	err := c.db.WithContext(ctx).Model(&Citation{}).Where("to_id = ?", paperID).Count(&count).Error
+	return int(count), err
 }
 
 // CitedBy returns papers that cite this paper (only cached papers with metadata).
@@ -58,29 +50,16 @@ func (c *Cache) CitedBy(ctx context.Context, paperID string, limit int) ([]Citin
 		limit = 50
 	}
 
-	rows, err := c.db.QueryContext(ctx, `
-		SELECT p.id, p.title
-		FROM citations c
-		JOIN papers p ON c.from_id = p.id
-		WHERE c.to_id = ?
-		ORDER BY p.created DESC
-		LIMIT ?
-	`, paperID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var papers []CitingPaper
-	for rows.Next() {
-		var p CitingPaper
-		if err := rows.Scan(&p.ID, &p.Title); err != nil {
-			return nil, err
-		}
-		papers = append(papers, p)
-	}
-
-	return papers, rows.Err()
+	err := c.db.WithContext(ctx).
+		Table("citations").
+		Select("papers.id, papers.title").
+		Joins("JOIN papers ON citations.from_id = papers.id").
+		Where("citations.to_id = ?", paperID).
+		Order("papers.created DESC").
+		Limit(limit).
+		Scan(&papers).Error
+	return papers, err
 }
 
 // Reference represents a paper that is cited.
@@ -92,82 +71,95 @@ type Reference struct {
 }
 
 func (c *Cache) References(ctx context.Context, paperID string) ([]Reference, error) {
-	rows, err := c.db.QueryContext(ctx, `
-		SELECT c.to_id, COALESCE(p.title, ''),
-		       CASE WHEN p.id IS NOT NULL AND p.title != '' THEN 1 ELSE 0 END,
-		       CASE WHEN p.src_downloaded = 1 THEN 1 ELSE 0 END
-		FROM citations c
-		LEFT JOIN papers p ON c.to_id = p.id
-		WHERE c.from_id = ?
-		ORDER BY c.to_id DESC
-	`, paperID)
-	if err != nil {
-		return nil, err
+	type refRow struct {
+		ID        string
+		Title     string
+		HasTitle  bool
+		HasSource bool
 	}
-	defer rows.Close()
 
-	var refs []Reference
-	for rows.Next() {
-		var r Reference
-		var hasTitle, hasSource int
-		if err := rows.Scan(&r.ID, &r.Title, &hasTitle, &hasSource); err != nil {
+	var rows []refRow
+	sqlDB, _ := c.db.DB()
+	err := c.db.WithContext(ctx).
+		Table("citations").
+		Select("citations.to_id as id, COALESCE(papers.title, '') as title, "+
+			"CASE WHEN papers.id IS NOT NULL AND papers.title != '' THEN 1 ELSE 0 END as has_title, "+
+			"CASE WHEN papers.src_downloaded = 1 THEN 1 ELSE 0 END as has_source").
+		Joins("LEFT JOIN papers ON citations.to_id = papers.id").
+		Where("citations.from_id = ?", paperID).
+		Order("citations.to_id DESC").
+		Scan(&rows).Error
+	if err != nil {
+		// Fallback to raw SQL for complex CASE statements
+		rawRows, err := sqlDB.QueryContext(ctx, `
+			SELECT c.to_id, COALESCE(p.title, ''),
+			       CASE WHEN p.id IS NOT NULL AND p.title != '' THEN 1 ELSE 0 END,
+			       CASE WHEN p.src_downloaded = 1 THEN 1 ELSE 0 END
+			FROM citations c
+			LEFT JOIN papers p ON c.to_id = p.id
+			WHERE c.from_id = ?
+			ORDER BY c.to_id DESC
+		`, paperID)
+		if err != nil {
 			return nil, err
 		}
-		r.HasTitle = hasTitle == 1
-		r.HasSource = hasSource == 1
-		refs = append(refs, r)
+		defer rawRows.Close()
+		var refs []Reference
+		for rawRows.Next() {
+			var r Reference
+			var hasTitle, hasSource int
+			if err := rawRows.Scan(&r.ID, &r.Title, &hasTitle, &hasSource); err != nil {
+				return nil, err
+			}
+			r.HasTitle = hasTitle == 1
+			r.HasSource = hasSource == 1
+			refs = append(refs, r)
+		}
+		return refs, rawRows.Err()
 	}
 
-	return refs, rows.Err()
+	refs := make([]Reference, len(rows))
+	for i, row := range rows {
+		refs[i] = Reference{
+			ID:        row.ID,
+			Title:     row.Title,
+			HasTitle:  row.HasTitle,
+			HasSource: row.HasSource,
+		}
+	}
+
+	return refs, nil
 }
 
 // UncachedReferenceCount returns the number of references without metadata.
 func (c *Cache) UncachedReferenceCount(ctx context.Context, paperID string) (int, error) {
-	var count int
-	err := c.db.QueryRowContext(ctx, `
+	var count int64
+	sqlDB, _ := c.db.DB()
+	err := sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM citations c
 		LEFT JOIN papers p ON c.to_id = p.id
 		WHERE c.from_id = ? AND (p.id IS NULL OR p.title = '')
 	`, paperID).Scan(&count)
-	return count, err
+	return int(count), err
 }
 
 // RebuildAllCitations rebuilds the citations table by re-extracting references from all papers.
 func (c *Cache) RebuildAllCitations(ctx context.Context) error {
 	// Clear existing citations
-	_, err := c.db.ExecContext(ctx, "DELETE FROM citations")
-	if err != nil {
-		return err
-	}
+	c.db.WithContext(ctx).Exec("DELETE FROM citations")
 
 	// Get all papers with source downloaded
-	rows, err := c.db.QueryContext(ctx, `
-		SELECT id, src_path FROM papers WHERE src_downloaded = 1 AND src_path IS NOT NULL
-	`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type paper struct {
-		id      string
-		srcPath string
-	}
-	var papers []paper
-	for rows.Next() {
-		var p paper
-		if err := rows.Scan(&p.id, &p.srcPath); err != nil {
-			return err
-		}
-		papers = append(papers, p)
-	}
-	if err := rows.Err(); err != nil {
+	var papers []Paper
+	if err := c.db.WithContext(ctx).
+		Select("id", "src_path").
+		Where("src_downloaded = ? AND src_path IS NOT NULL", true).
+		Find(&papers).Error; err != nil {
 		return err
 	}
 
 	// Extract and store citations for each paper
 	for _, p := range papers {
-		if err := c.UpdateCitations(ctx, p.id, p.srcPath); err != nil {
+		if err := c.UpdateCitations(ctx, p.ID, p.SourcePath); err != nil {
 			return err
 		}
 	}
@@ -364,7 +356,9 @@ func (c *Cache) GetCitationGraph(ctx context.Context, paperID string) (*Citation
 
 	// Find edges between references (if they cite each other)
 	if len(refIDs) > 0 {
-		rows, err := c.db.QueryContext(ctx, `
+		// Complex citation graph query - use raw SQL for efficiency
+		sqlDB, _ := c.db.DB()
+		rows, err := sqlDB.QueryContext(ctx, `
 			SELECT from_id, to_id FROM citations
 			WHERE from_id IN (SELECT to_id FROM citations WHERE from_id = ?)
 			  AND to_id IN (SELECT to_id FROM citations WHERE from_id = ?)

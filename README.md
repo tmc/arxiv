@@ -65,6 +65,44 @@ The web interface provides:
   - Interactive D3.js citation graph visualization
   - Category and author browsing
   - Direct arXiv ID/URL input for fetching new papers
+  - Export papers as BibTeX, RIS, or JSON
+  - REST API for programmatic access (see API.md)
+
+## REST API
+
+A complete REST API is available at `/api/v1/` for programmatic access:
+
+```bash
+# Get paper metadata
+curl http://localhost:8080/api/v1/papers/2301.00001
+
+# Search papers
+curl "http://localhost:8080/api/v1/search?q=transformer&limit=10"
+
+# Export as BibTeX
+curl http://localhost:8080/api/v1/papers/2301.00001/export/bibtex
+
+# Get citation graph
+curl http://localhost:8080/api/v1/papers/2301.00001/graph
+```
+
+See [docs/API.md](docs/API.md) for complete API documentation.
+
+## Export Features
+
+Papers can be exported in multiple formats:
+
+- **BibTeX**: `/paper/{id}/export/bibtex` or `/api/v1/papers/{id}/export/bibtex`
+- **RIS**: `/paper/{id}/export/ris` or `/api/v1/papers/{id}/export/ris`
+- **JSON**: `/paper/{id}/export/json` or `/api/v1/papers/{id}/export/json`
+
+## Performance Features
+
+- **HTTP Caching**: Responses cached with ETag support (5 minutes)
+- **LRU Cache**: In-memory cache for 500,000 most recently accessed papers (~500MB-1GB memory)
+  - LRU = Least Recently Used (eviction algorithm)
+  - Automatically evicts least-recently-used entries when full
+- **Rate Limiting**: 100 requests/minute per IP to prevent abuse
 
 ## Syncing Metadata
 

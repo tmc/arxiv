@@ -45,6 +45,15 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 
 	srv := &server{cache: cache, cacheDir: cacheDir}
 	mux := http.NewServeMux()
+
+	// API routes (before other routes for proper matching)
+	mux.HandleFunc("/api/v1/papers/", srv.handleAPIPaper)
+	mux.HandleFunc("/api/v1/search", srv.handleAPISearch)
+	mux.HandleFunc("/api/v1/search/pdf", srv.handleAPISearchPDF)
+	mux.HandleFunc("/api/v1/categories", srv.handleAPICategories)
+	mux.HandleFunc("/api/v1/stats", srv.handleAPIStats)
+
+	// Web routes
 	mux.HandleFunc("/", srv.handleIndex)
 	mux.HandleFunc("/search", srv.handleSearch)
 	mux.HandleFunc("/paper/", srv.handlePaper)
@@ -57,10 +66,18 @@ func cmdServe(ctx context.Context, cacheDir string, args []string) {
 	mux.HandleFunc("/robots.txt", srv.handleRobots)
 	mux.HandleFunc("/sitemap.xml", srv.handleSitemap)
 
+	// Setup middleware
+	cacheMW := newCacheMiddleware(5 * time.Minute) // Cache for 5 minutes
+	rateLimiter := newRateLimiter(100, time.Minute) // 100 requests per minute
+
+	// Apply middleware: rate limiting first, then caching
+	handler := rateLimiter.Handler(cacheMW.Handler(mux))
+
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Starting server at http://localhost%s", addr)
+	log.Printf("API available at http://localhost%s/api/v1/", addr)
 
-	httpServer := &http.Server{Addr: addr, Handler: mux}
+	httpServer := &http.Server{Addr: addr, Handler: handler}
 	go func() {
 		<-ctx.Done()
 		httpServer.Shutdown(context.Background())
@@ -382,6 +399,41 @@ func (s *server) handlePaper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle /paper/:id/export/:format - export paper (bibtex, ris, json)
+	if strings.Contains(path, "/export/") {
+		parts := strings.Split(path, "/export/")
+		if len(parts) == 2 {
+			paperID := parts[0]
+			format := parts[1]
+			paper, err := s.cache.GetPaper(ctx, paperID)
+			if err != nil {
+				http.Error(w, "paper not found", http.StatusNotFound)
+				return
+			}
+
+			switch format {
+			case "bibtex":
+				w.Header().Set("Content-Type", "application/x-bibtex; charset=utf-8")
+				w.Header().Set("Content-Disposition", `attachment; filename="`+paperID+`.bib"`)
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(paper.ToBibTeX()))
+				return
+			case "ris":
+				w.Header().Set("Content-Type", "application/x-research-info-systems; charset=utf-8")
+				w.Header().Set("Content-Disposition", `attachment; filename="`+paperID+`.ris"`)
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(paper.ToRIS()))
+				return
+			case "json":
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.Header().Set("Content-Disposition", `attachment; filename="`+paperID+`.json"`)
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(paper)
+				return
+			}
+		}
+	}
+
 	id := path
 
 	// For canonical viewing, redirect plain /paper/{id} to /abs/{id}
@@ -557,7 +609,7 @@ func (s *server) handlePDF(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Download PDF if we don't have it yet
+	// Download PDF if we don't have it yet or path is missing
 	if !paper.PDFDownloaded || paper.PDFPath == "" {
 		opts := &arxiv.DownloadOptions{DownloadPDF: true, DownloadSource: false}
 		if err := s.cache.DownloadPaper(ctx, paper.ID, opts); err != nil {

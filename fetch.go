@@ -28,25 +28,9 @@ func (c *Cache) Fetch(ctx context.Context, id string) (*Paper, error) {
 	}
 
 	// Store in database
-	_, err = c.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO papers
-		(id, created, updated, title, abstract, authors, categories, comments, journal_ref, doi, license, metadata_updated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		paper.ID,
-		paper.Created.Format("2006-01-02"),
-		paper.Updated.Format("2006-01-02"),
-		paper.Title,
-		paper.Abstract,
-		paper.Authors,
-		paper.Categories,
-		paper.Comments,
-		paper.JournalRef,
-		paper.DOI,
-		paper.License,
-		time.Now().Format(time.RFC3339),
-	)
-	if err != nil {
+	now := time.Now()
+	paper.MetadataUpdated = &now
+	if err := c.db.WithContext(ctx).Save(paper).Error; err != nil {
 		return nil, fmt.Errorf("store paper: %w", err)
 	}
 
@@ -116,25 +100,9 @@ func (c *Cache) FetchBatch(ctx context.Context, ids []string) ([]*Paper, error) 
 			continue
 		}
 
-		_, err = c.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO papers
-			(id, created, updated, title, abstract, authors, categories, comments, journal_ref, doi, license, metadata_updated)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-			paper.ID,
-			paper.Created.Format("2006-01-02"),
-			paper.Updated.Format("2006-01-02"),
-			paper.Title,
-			paper.Abstract,
-			paper.Authors,
-			paper.Categories,
-			paper.Comments,
-			paper.JournalRef,
-			paper.DOI,
-			paper.License,
-			time.Now().Format(time.RFC3339),
-		)
-		if err == nil {
+		now := time.Now()
+		paper.MetadataUpdated = &now
+		if err := c.db.WithContext(ctx).Save(paper).Error; err == nil {
 			existing = append(existing, paper)
 		}
 	}

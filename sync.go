@@ -37,16 +37,15 @@ func (c *Cache) SyncMetadata(ctx context.Context, opts *SyncOptions) error {
 	client := NewOAIClient()
 
 	// Check for existing resumption token
-	var resumptionToken string
-	row := c.db.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key = 'resumption_token'")
-	row.Scan(&resumptionToken)
+	var state SyncState
+	c.db.WithContext(ctx).Where("key = ?", "resumption_token").First(&state)
+	resumptionToken := state.Value
 
 	// If no resumption token, check last sync date
 	if resumptionToken == "" && opts.From.IsZero() {
-		var lastSync string
-		row := c.db.QueryRowContext(ctx, "SELECT value FROM sync_state WHERE key = 'last_sync'")
-		if row.Scan(&lastSync) == nil && lastSync != "" {
-			opts.From, _ = time.Parse("2006-01-02", lastSync)
+		var lastSyncState SyncState
+		if c.db.WithContext(ctx).Where("key = ?", "last_sync").First(&lastSyncState).Error == nil && lastSyncState.Value != "" {
+			opts.From, _ = time.Parse("2006-01-02", lastSyncState.Value)
 		}
 	}
 
@@ -105,55 +104,27 @@ func (c *Cache) SyncMetadata(ctx context.Context, opts *SyncOptions) error {
 	}
 
 	// Clear resumption token and save last sync date
-	c.db.ExecContext(ctx, "DELETE FROM sync_state WHERE key = 'resumption_token'")
-	c.db.ExecContext(ctx, "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_sync', ?)",
-		time.Now().Format("2006-01-02"))
+	c.db.WithContext(ctx).Where("key = ?", "resumption_token").Delete(&SyncState{})
+	c.db.WithContext(ctx).Save(&SyncState{
+		Key:   "last_sync",
+		Value: time.Now().Format("2006-01-02"),
+	})
 
 	log.Printf("sync complete: %d papers", totalFetched)
 	return nil
 }
 
 func (c *Cache) saveResumptionToken(ctx context.Context, token string) {
-	c.db.ExecContext(ctx, "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('resumption_token', ?)", token)
+	c.db.WithContext(ctx).Save(&SyncState{
+		Key:   "resumption_token",
+		Value: token,
+	})
 }
 
 func (c *Cache) insertPapers(ctx context.Context, papers []Paper) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	now := time.Now()
+	for i := range papers {
+		papers[i].MetadataUpdated = &now
 	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR REPLACE INTO papers
-		(id, created, updated, title, abstract, authors, categories, comments, journal_ref, doi, license, metadata_updated)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	now := time.Now().Format(time.RFC3339)
-	for _, p := range papers {
-		_, err := stmt.ExecContext(ctx,
-			p.ID,
-			p.Created.Format("2006-01-02"),
-			p.Updated.Format("2006-01-02"),
-			p.Title,
-			p.Abstract,
-			p.Authors,
-			p.Categories,
-			p.Comments,
-			p.JournalRef,
-			p.DOI,
-			p.License,
-			now,
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	return c.db.WithContext(ctx).Save(papers).Error
 }

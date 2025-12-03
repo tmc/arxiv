@@ -7,6 +7,7 @@ import (
 )
 
 // Search searches papers by title/abstract text using FTS5.
+// Note: Uses raw SQL because GORM doesn't support FTS5 MATCH queries.
 func (c *Cache) Search(ctx context.Context, query, category string, limit int) ([]Paper, error) {
 	if limit <= 0 {
 		limit = 20
@@ -29,7 +30,9 @@ func (c *Cache) Search(ctx context.Context, query, category string, limit int) (
 	sql += " ORDER BY rank LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := c.db.QueryContext(ctx, sql, args...)
+	// Must use raw SQL for FTS5 MATCH queries - GORM doesn't support FTS5
+	sqlDB, _ := c.db.DB()
+	rows, err := sqlDB.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -67,51 +70,19 @@ func (c *Cache) SearchByAuthor(ctx context.Context, author string, limit int) ([
 		limit = 100
 	}
 
-	sql := `
-		SELECT id, created, updated, title, abstract, authors, categories,
-		       comments, journal_ref, doi, license, pdf_downloaded, src_downloaded
-		FROM papers
-		WHERE authors LIKE '%' || ? || '%'
-		ORDER BY created DESC
-		LIMIT ?
-	`
-
-	rows, err := c.db.QueryContext(ctx, sql, author, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var papers []Paper
-	for rows.Next() {
-		var p Paper
-		var created, updated string
-		var pdfDl, srcDl int
-
-		err := rows.Scan(
-			&p.ID, &created, &updated, &p.Title, &p.Abstract, &p.Authors,
-			&p.Categories, &p.Comments, &p.JournalRef, &p.DOI, &p.License,
-			&pdfDl, &srcDl,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		p.Created, _ = time.Parse("2006-01-02", created)
-		p.Updated, _ = time.Parse("2006-01-02", updated)
-		p.PDFDownloaded = pdfDl == 1
-		p.SourceDownloaded = srcDl == 1
-
-		papers = append(papers, p)
-	}
-
-	return papers, rows.Err()
+	err := c.db.WithContext(ctx).
+		Where("authors LIKE ?", "%"+author+"%").
+		Order("created DESC").
+		Limit(limit).
+		Find(&papers).Error
+	return papers, err
 }
 
 // PaperExists checks if a paper exists in the cache.
 func (c *Cache) PaperExists(ctx context.Context, id string) bool {
-	var count int
-	err := c.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM papers WHERE id = ?", id).Scan(&count)
+	var count int64
+	err := c.db.WithContext(ctx).Model(&Paper{}).Where("id = ?", id).Count(&count).Error
 	return err == nil && count > 0
 }
 
@@ -125,24 +96,16 @@ type CategoryCount struct {
 func (c *Cache) ListCategories(ctx context.Context) ([]CategoryCount, error) {
 	// Categories are space-separated in the categories column
 	// We need to split and count each individual category
-	rows, err := c.db.QueryContext(ctx, "SELECT categories FROM papers WHERE categories != ''")
-	if err != nil {
+	var papers []Paper
+	if err := c.db.WithContext(ctx).Select("categories").Where("categories != ?", "").Find(&papers).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	counts := make(map[string]int)
-	for rows.Next() {
-		var cats string
-		if err := rows.Scan(&cats); err != nil {
-			return nil, err
-		}
-		for _, cat := range strings.Fields(cats) {
+	for _, p := range papers {
+		for _, cat := range strings.Fields(p.Categories) {
 			counts[cat]++
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
 	var result []CategoryCount
@@ -168,112 +131,40 @@ func (c *Cache) ListPapers(ctx context.Context, category string, offset, limit i
 		limit = 100
 	}
 
-	sql := `
-		SELECT id, created, updated, title, abstract, authors, categories,
-		       comments, journal_ref, doi, license, pdf_downloaded, src_downloaded
-		FROM papers
-	`
-	var args []any
-
+	query := c.db.WithContext(ctx).Model(&Paper{})
 	if category != "" {
-		sql += " WHERE categories LIKE '%' || ? || '%'"
-		args = append(args, category)
+		query = query.Where("categories LIKE ?", "%"+category+"%")
 	}
-
-	sql += " ORDER BY created DESC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
-
-	rows, err := c.db.QueryContext(ctx, sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	var papers []Paper
-	for rows.Next() {
-		var p Paper
-		var created, updated string
-		var pdfDl, srcDl int
-
-		err := rows.Scan(
-			&p.ID, &created, &updated, &p.Title, &p.Abstract, &p.Authors,
-			&p.Categories, &p.Comments, &p.JournalRef, &p.DOI, &p.License,
-			&pdfDl, &srcDl,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		p.Created, _ = time.Parse("2006-01-02", created)
-		p.Updated, _ = time.Parse("2006-01-02", updated)
-		p.PDFDownloaded = pdfDl == 1
-		p.SourceDownloaded = srcDl == 1
-
-		papers = append(papers, p)
-	}
-
-	return papers, rows.Err()
+	err := query.Order("created DESC").Limit(limit).Offset(offset).Find(&papers).Error
+	return papers, err
 }
 
 // ListPapersFiltered lists papers with various filter options.
 func (c *Cache) ListPapersFiltered(ctx context.Context, category string, srcOnly, all bool, limit int) ([]Paper, error) {
-	sql := `
-		SELECT id, created, updated, title, abstract, authors, categories,
-		       comments, journal_ref, doi, license, pdf_downloaded, src_downloaded
-		FROM papers
-		WHERE 1=1
-	`
-	var args []any
+	query := c.db.WithContext(ctx).Model(&Paper{})
 
 	if category != "" {
-		sql += " AND categories LIKE '%' || ? || '%'"
-		args = append(args, category)
+		query = query.Where("categories LIKE ?", "%"+category+"%")
 	}
 
 	if srcOnly {
-		sql += " AND src_downloaded = 1"
+		query = query.Where("src_downloaded = ?", true)
 	} else if !all {
 		// Default: show papers with source OR title (exclude metadata-only without useful info)
-		sql += " AND (src_downloaded = 1 OR title != '')"
+		query = query.Where("src_downloaded = ? OR title != ?", true, "")
 	}
 
-	sql += " ORDER BY id DESC"
+	query = query.Order("id DESC")
 
 	if limit > 0 {
-		sql += " LIMIT ?"
-		args = append(args, limit)
+		query = query.Limit(limit)
 	}
-
-	rows, err := c.db.QueryContext(ctx, sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	var papers []Paper
-	for rows.Next() {
-		var p Paper
-		var created, updated string
-		var pdfDl, srcDl int
-
-		err := rows.Scan(
-			&p.ID, &created, &updated, &p.Title, &p.Abstract, &p.Authors,
-			&p.Categories, &p.Comments, &p.JournalRef, &p.DOI, &p.License,
-			&pdfDl, &srcDl,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		p.Created, _ = time.Parse("2006-01-02", created)
-		p.Updated, _ = time.Parse("2006-01-02", updated)
-		p.PDFDownloaded = pdfDl == 1
-		p.SourceDownloaded = srcDl == 1
-
-		papers = append(papers, p)
-	}
-
-	return papers, rows.Err()
+	err := query.Find(&papers).Error
+	return papers, err
 }
 
 // DownloadCategory downloads papers for a category.
@@ -304,7 +195,8 @@ func (c *Cache) DownloadCategory(ctx context.Context, category string, limit int
 		args = append(args, limit)
 	}
 
-	rows, err := c.db.QueryContext(ctx, sql, args...)
+	sqlDB, _ := c.db.DB()
+	rows, err := sqlDB.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return err
 	}

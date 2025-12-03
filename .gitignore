@@ -1,0 +1,12 @@
+# Build artifacts
+arxiv
+arxiv-server
+*.exe
+*.test
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
